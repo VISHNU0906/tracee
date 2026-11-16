@@ -2,7 +2,8 @@
 # Regression for aquasecurity/tracee#5387:
 # Rendered Tracee config must use keys the chart's pinned image (appVersion /
 # Tracee 0.24.1) understands: server.http-address, log, output.<format>.files,
-# and output.options.parse-arguments (mapped from enrichment.decoded-data).
+# and output.options.{parse-arguments,stack-addresses,exec-env,exec-hash}
+# (mapped from config.enrichment).
 # Legacy listen-addr / top-level healthz / metrics leave readiness on :3366 failing.
 # Unreleased main keys (logging, output.destinations) must not appear while the
 # chart still defaults to the 0.24.1 image.
@@ -131,6 +132,25 @@ elif parse_args is True:
 else:
     ok(f"output.options.parse-arguments={parse_args!r}")
 
+# Tracee 0.24.1 reads these output options, not enrichment.*.
+enr = doc.get("enrichment") or {}
+for opt, key in (("stack-addresses", "user-stack"), ("exec-env", "environment")):
+    want = enr.get(key) is True
+    got = dig(doc, "output", "options", opt)
+    if got is not want:
+        bad(f"output.options.{opt} must mirror enrichment.{key}={want}, got {got!r}")
+    else:
+        ok(f"output.options.{opt}={got!r} (from enrichment.{key})")
+eh = enr.get("executable-hash") or {}
+got = dig(doc, "output", "options", "exec-hash")
+if eh.get("enabled") or eh.get("mode"):
+    if got != (eh.get("mode") or "dev-inode"):
+        bad(f"output.options.exec-hash must mirror enrichment.executable-hash={eh!r}, got {got!r}")
+    else:
+        ok(f"output.options.exec-hash={got!r} (from enrichment.executable-hash)")
+elif got is not None:
+    bad(f"output.options.exec-hash must be absent when executable-hash is off, got {got!r}")
+
 # Legacy keys that break readiness / buffers
 for legacy in ("listen-addr", "healthz", "metrics"):
     if legacy in doc:
@@ -143,6 +163,47 @@ PY
 then
   fail=1
 fi
+
+# enrichment -> 0.24.1 output.options mapping for non-default values.
+# Each case: expected stack-addresses, exec-env, exec-hash ("-" = absent), then helm --set args.
+enrichment_case() {
+  local want_stack="$1" want_env="$2" want_hash="$3"
+  shift 3
+  local out="$tmpdir/case.yaml"
+  helm template tracee "$root" "$@" > "$out"
+  if ! python3 - "$out" "$want_stack" "$want_env" "$want_hash" "$*" <<'PY'
+import sys, yaml
+src, want_stack, want_env, want_hash, args = sys.argv[1:]
+cfg = None
+for d in yaml.safe_load_all(open(src)):
+    if isinstance(d, dict) and d.get("kind") == "ConfigMap" and (d.get("metadata") or {}).get("name") == "tracee-config":
+        cfg = yaml.safe_load(d["data"]["config.yaml"])
+opts = ((cfg or {}).get("output") or {}).get("options") or {}
+got = (str(opts.get("stack-addresses")).lower(), str(opts.get("exec-env")).lower(), opts.get("exec-hash", "-"))
+want = (want_stack, want_env, want_hash)
+if got != want:
+    print(f"FAIL: [{args}] stack-addresses/exec-env/exec-hash = {got}, want {want}", file=sys.stderr)
+    sys.exit(1)
+print(f"OK: [{args}] stack-addresses/exec-env/exec-hash = {got}")
+PY
+  then
+    fail=1
+  fi
+}
+
+enrichment_case true true digest-inode \
+  --set config.enrichment.user-stack=true \
+  --set config.enrichment.environment=true \
+  --set config.enrichment.executable-hash.mode=digest-inode
+# main falls back to dev-inode for a mode it does not know; 0.24.1 would reject it.
+enrichment_case false false dev-inode \
+  --set config.enrichment.executable-hash.mode=sha256
+enrichment_case false false dev-inode \
+  --set config.enrichment.executable-hash.enabled=true \
+  --set config.enrichment.executable-hash.mode=null
+enrichment_case false false - \
+  --set config.enrichment.executable-hash.enabled=false \
+  --set config.enrichment.executable-hash.mode=null
 
 static="$repo/deploy/kubernetes/tracee/tracee.yaml"
 if [[ -f "$static" ]]; then
@@ -228,6 +289,11 @@ if dig(payload, "output", "options", "parse-arguments") is not True:
     bad("missing output.options.parse-arguments=true")
 else:
     ok("has output.options.parse-arguments")
+
+if dig(payload, "output", "options", "exec-hash") != "dev-inode":
+    bad("missing output.options.exec-hash=dev-inode")
+else:
+    ok("has output.options.exec-hash")
 
 if "listen-addr" in payload:
     bad("has listen-addr")

@@ -168,8 +168,19 @@ data:
           files:
             - stdout
         options:
-            {{- /* Tracee 0.24.1 ignores enrichment.*; map decoded-data to parse-arguments. */}}
+            {{- /* Tracee 0.24.1 ignores enrichment.*; map it to the output options that release reads. */}}
             parse-arguments: {{ index .Values.config.enrichment "decoded-data" | default false }}
+            stack-addresses: {{ index .Values.config.enrichment "user-stack" | default false }}
+            exec-env: {{ index .Values.config.enrichment "environment" | default false }}
+            {{- $execHashOpt := index .Values.config.enrichment "executable-hash" | default dict }}
+            {{- if or (index $execHashOpt "enabled") (index $execHashOpt "mode") }}
+            {{- /* Same rule as enrichment.executable-hash on main: unset or unknown mode means dev-inode. */}}
+            {{- $execHashMode := index $execHashOpt "mode" | default "dev-inode" }}
+            {{- if not (has $execHashMode (list "none" "inode" "dev-inode" "digest-inode")) }}
+            {{- $execHashMode = "dev-inode" }}
+            {{- end }}
+            exec-hash: {{ $execHashMode }}
+            {{- end }}
             sort-events: {{ .Values.config.output.sortEvents }}
         {{- with .Values.config.output.webhook }}
         webhook:

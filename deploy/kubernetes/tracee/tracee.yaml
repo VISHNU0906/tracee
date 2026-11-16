@@ -53,6 +53,9 @@ data:
             - stdout
         options:
             parse-arguments: true
+            stack-addresses: false
+            exec-env: false
+            exec-hash: dev-inode
             sort-events: false
 ---
 # Source: tracee/templates/role.yaml
